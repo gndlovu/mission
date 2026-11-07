@@ -8,6 +8,8 @@ Built after the "agentic OS" pattern: one place that shows the agent's memory,
 skills, sessions and spend, with the memory graph drawn as a field of glowing
 orbs.
 
+![Mission home — stat cards and the memory graph](docs/home.png)
+
 ## Run
 
 ```bash
