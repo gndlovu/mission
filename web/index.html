@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
 <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-<link rel="stylesheet" href="/style.css?v=3e7c7d25" />
+<link rel="stylesheet" href="/style.css?v=e3104903" />
 </head>
 <body>
 <canvas id="bgfx" aria-hidden="true"></canvas>
@@ -233,6 +233,17 @@
       <div style="height:16px"></div>
       <div class="graph-wrap">
         <div class="graph-head">
+          <span class="title">Finished seeding — safe to clear</span>
+          <span class="count" id="rmCount">—</span>
+          <button class="btn-danger" id="rmBtn" disabled>Remove selected</button>
+        </div>
+        <div id="rmBody"></div>
+        <div id="rmBlocked"></div>
+      </div>
+
+      <div style="height:16px"></div>
+      <div class="graph-wrap">
+        <div class="graph-head">
           <span class="title">Airing next 7 days</span>
           <span class="count" id="upCount">—</span>
         </div>
@@ -294,7 +305,7 @@
   </div>
 </div>
 
-<script src="/app.js?v=50003caa"></script>
+<script src="/app.js?v=9e9bd3d0"></script>
 <script src="/bgfx.js?v=50003caa"></script>
 </body>
 </html>

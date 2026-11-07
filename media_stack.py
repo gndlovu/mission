@@ -77,7 +77,12 @@ def _get(url: str, headers: dict | None = None, data: bytes | None = None):
         req.add_header(k, v)
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
         body = r.read().decode("utf-8", "replace")
-    return json.loads(body) if body.strip()[:1] in "[{" else body
+    # NB: `"" in "[{"` is True in Python, so an empty body (which qBittorrent
+    # returns from /torrents/delete) would reach json.loads and raise — making
+    # a successful delete look like a failure. Compare against a tuple instead.
+    if body.strip()[:1] in ("[", "{"):
+        return json.loads(body)
+    return body
 
 
 def _arr(base: str, key: str, path: str, params: dict | None = None):
@@ -96,9 +101,14 @@ def _gb(n) -> float:
 
 def _qbit(base: str) -> list:
     out = []
+    if not base:
+        return out
     try:
         for t in _get(base.rstrip("/") + "/api/v2/torrents/info") or []:
             out.append({
+                "hash": (t.get("hash") or "").lower(),
+                "ratio": round(t.get("ratio") or 0, 2),
+                "seed_hours": round((t.get("seeding_time") or 0) / 3600, 1),
                 "name": t.get("name") or "?",
                 "pct": round((t.get("progress") or 0) * 100, 1),
                 "state": t.get("state") or "",
@@ -113,30 +123,45 @@ def _qbit(base: str) -> list:
     return out
 
 
-def _transmission(base: str) -> list:
+def _transmission_rpc(base: str, method: str, args: dict | None = None) -> dict:
+    """Transmission RPC with the mandatory CSRF handshake.
+
+    A bare request returns 409 plus an X-Transmission-Session-Id header; the
+    real call must carry it. A 409 here is normal, not a fault.
+    """
     url = base.rstrip("/") + "/transmission/rpc"
     sid = ""
-    try:  # CSRF dance: bare request returns 409 + session id header
+    try:
         _get(url, data=b"{}")
     except urllib.error.HTTPError as e:
         sid = e.headers.get("X-Transmission-Session-Id", "")
-    except Exception:
-        return []
-    body = json.dumps({"method": "torrent-get", "arguments": {"fields": [
-        "name", "percentDone", "status", "totalSize", "downloadedEver",
-        "rateDownload", "eta"]}}).encode()
-    try:
-        d = _get(url, {"Content-Type": "application/json",
-                       "X-Transmission-Session-Id": sid}, data=body)
-    except Exception:
-        return []
+    body = json.dumps({"method": method, "arguments": args or {}}).encode()
+    d = _get(url, {"Content-Type": "application/json",
+                   "X-Transmission-Session-Id": sid}, data=body)
+    # the method name is easy to get wrong ("torrents-get" returns no key at
+    # all), so a non-success result must raise rather than look like empty data
     if not isinstance(d, dict) or d.get("result") != "success":
+        raise RuntimeError(f"transmission {method}: {(d or {}).get('result', 'no response')}")
+    return d
+
+
+def _transmission(base: str) -> list:
+    if not base:
+        return []
+    try:
+        d = _transmission_rpc(base, "torrent-get", {"fields": [
+            "name", "percentDone", "status", "totalSize", "downloadedEver",
+            "rateDownload", "eta", "hashString", "uploadRatio", "secondsSeeding"]})
+    except Exception:
         return []
     STATES = {0: "stopped", 1: "check-wait", 2: "checking", 3: "dl-wait",
               4: "downloading", 5: "seed-wait", 6: "seeding"}
     out = []
     for t in d.get("arguments", {}).get("torrents", []) or []:
         out.append({
+            "hash": (t.get("hashString") or "").lower(),
+            "ratio": round(t.get("uploadRatio") or 0, 2),
+            "seed_hours": round((t.get("secondsSeeding") or 0) / 3600, 1),
             "name": t.get("name") or "?",
             "pct": round((t.get("percentDone") or 0) * 100, 1),
             "state": STATES.get(t.get("status"), str(t.get("status"))),
@@ -149,6 +174,10 @@ def _transmission(base: str) -> list:
     return out
 
 
+_qbit_raw = _qbit
+_transmission_raw = _transmission
+
+
 class MediaStack:
     """Cached, read-only view of the media stack."""
 
@@ -156,6 +185,127 @@ class MediaStack:
         self.home = Path(hermes_home)
         self._cache = None
         self._at = 0.0
+
+    # -- removable (imported) downloads ---------------------------------
+
+    @staticmethod
+    def _imported_ids(base: str, key: str, ver: str = "v3") -> set:
+        """downloadIds the service has confirmed as imported.
+
+        eventType 3 == downloadFolderImported. This is the ONLY proof used that
+        a download is safe to delete; st_nlink is unreliable on the CIFS mount
+        and a size match alone proves nothing.
+        """
+        out = set()
+        try:
+            h = _arr(base, key, f"/api/{ver}/history",
+                     {"page": 1, "pageSize": 200, "eventType": 3,
+                      "sortKey": "date", "sortDirection": "descending"})
+            for rec in (h or {}).get("records", []):
+                did = rec.get("downloadId")
+                if did:
+                    out.add(did.strip().lower())
+        except Exception:
+            pass
+        return out
+
+    @staticmethod
+    def _queued_ids(base: str, key: str, ver: str = "v3") -> set:
+        """downloadIds the service still has work pending for.
+
+        A season pack imports per EPISODE, so the presence of one
+        downloadFolderImported record does NOT mean the torrent is finished
+        with — Sonarr may still be waiting on other episodes in the same pack.
+        Anything still in the queue must never be offered for deletion.
+        """
+        out = set()
+        try:
+            q = _arr(base, key, f"/api/{ver}/queue",
+                     {"includeUnknownItems": "true", "pageSize": 500})
+            for rec in (q or {}).get("records", []):
+                did = rec.get("downloadId")
+                if did:
+                    out.add(did.strip().lower())
+        except Exception:
+            # On any doubt, treat nothing as safe rather than assume an empty queue
+            raise
+        return out
+
+    def removable(self, env: dict | None = None) -> dict:
+        """Complete torrents the *arr has imported AND has no pending work for.
+
+        Returns {"items": [...], "blocked": [...]} — blocked entries carry a
+        reason and are never actionable.
+        """
+        env = env or _load_env(self.home)
+        imported, queued = set(), set()
+        try:
+            if env.get("RADARR_URL") and env.get("RADARR_API_KEY"):
+                imported |= self._imported_ids(env["RADARR_URL"], env["RADARR_API_KEY"])
+                queued |= self._queued_ids(env["RADARR_URL"], env["RADARR_API_KEY"])
+            if env.get("SONARR_URL") and env.get("SONARR_API_KEY"):
+                imported |= self._imported_ids(env["SONARR_URL"], env["SONARR_API_KEY"])
+                queued |= self._queued_ids(env["SONARR_URL"], env["SONARR_API_KEY"])
+        except Exception as exc:
+            # Could not establish what is pending -> offer nothing at all.
+            return {"items": [], "blocked": [], "reclaimable_gb": 0.0,
+                    "error": f"queue unavailable, nothing offered: {exc.__class__.__name__}"}
+
+        items, blocked = [], []
+        for t in _qbit_raw(env.get("QBITTORRENT_URL")) + _transmission_raw(env.get("TRANSMISSION_URL")):
+            row = {"hash": t["hash"], "name": t["name"], "client": t["client"],
+                   "size_gb": t["size_gb"], "pct": t["pct"], "ratio": t.get("ratio"),
+                   "seed_hours": t.get("seed_hours")}
+            if t["pct"] < 100:
+                row["reason"] = f"still downloading ({t['pct']:.0f}%)"
+                blocked.append(row)
+            elif t["hash"] in queued:
+                row["reason"] = "Radarr/Sonarr still has queued items for it"
+                blocked.append(row)
+            elif t["hash"] not in imported:
+                row["reason"] = "not confirmed imported by Radarr/Sonarr"
+                blocked.append(row)
+            else:
+                items.append(row)
+        items.sort(key=lambda r: -r["size_gb"])
+        blocked.sort(key=lambda r: -r["size_gb"])
+        return {"items": items, "blocked": blocked,
+                "reclaimable_gb": round(sum(r["size_gb"] for r in items), 2)}
+
+    def remove(self, hashes: list) -> dict:
+        """Delete the given torrents AND their download-folder files.
+
+        Every hash is re-verified against removable() at call time: a stale
+        browser list must never be able to delete something mid-import.
+        """
+        env = _load_env(self.home)
+        allowed = {r["hash"]: r for r in self.removable(env)["items"]}
+        results = []
+        for h in [str(x).strip().lower() for x in (hashes or [])]:
+            row = allowed.get(h)
+            if not row:
+                results.append({"hash": h, "ok": False,
+                                "detail": "not in the removable set at execution time"})
+                continue
+            try:
+                if row["client"] == "qbittorrent":
+                    base = env["QBITTORRENT_URL"].rstrip("/")
+                    _get(f"{base}/api/v2/torrents/delete",
+                         data=urllib.parse.urlencode(
+                             {"hashes": h, "deleteFiles": "true"}).encode())
+                else:
+                    _transmission_rpc(env["TRANSMISSION_URL"], "torrent-remove",
+                                      {"ids": [h], "delete-local-data": True})
+                results.append({"hash": h, "ok": True, "name": row["name"],
+                                "freed_gb": row["size_gb"], "client": row["client"]})
+            except Exception as exc:
+                results.append({"hash": h, "ok": False,
+                                "detail": f"{exc.__class__.__name__}: {exc}"})
+        self._cache = None  # force a fresh snapshot next poll
+        return {"results": results,
+                "freed_gb": round(sum(r.get("freed_gb", 0) for r in results if r["ok"]), 2),
+                "removed": sum(1 for r in results if r["ok"]),
+                "failed": sum(1 for r in results if not r["ok"])}
 
     def snapshot(self, force: bool = False) -> dict:
         now = time.time()

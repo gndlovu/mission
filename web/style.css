@@ -494,3 +494,27 @@ body::after {
 
 *{scrollbar-width:none;-ms-overflow-style:none}
 *::-webkit-scrollbar{width:0;height:0}
+
+/* ------------------------------------------------- media: cleanup */
+
+.btn-danger{margin-left:auto;padding:7px 13px;border-radius:9px;cursor:pointer;
+  font:700 10.5px/1 "Space Grotesk",sans-serif;letter-spacing:.07em;
+  text-transform:uppercase;color:#fff5f8;
+  background:linear-gradient(135deg,rgba(236,72,153,.3),rgba(251,113,133,.32));
+  border:1px solid rgba(251,113,133,.5);transition:.16s ease}
+.btn-danger:hover:not(:disabled){transform:translateY(-1px);
+  border-color:rgba(251,113,133,.9);
+  box-shadow:0 6px 18px rgba(251,113,133,.3)}
+.btn-danger:disabled{opacity:.4;cursor:default;
+  background:rgba(255,255,255,.04);border-color:rgba(143,163,168,.2);color:#8fa3a8}
+
+.rm-row{display:flex;align-items:center;gap:10px;padding:9px 2px;cursor:pointer;
+  border-bottom:1px solid rgba(41,245,255,.07)}
+.rm-row:last-child{border-bottom:0}
+.rm-row:hover{background:rgba(41,245,255,.03)}
+.rm-row input{accent-color:#ec4899;width:15px;height:15px;flex:none;cursor:pointer}
+.rm-name{flex:1;font:500 12px/1.4 "JetBrains Mono",monospace;color:#dbe7ea;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rm-meta{flex:none;font:500 10.5px/1 "JetBrains Mono",monospace;color:#8fa3a8}
+.rm-blocked-head{margin:14px 0 4px;font:600 9.5px/1 "Space Grotesk",sans-serif;
+  letter-spacing:.1em;text-transform:uppercase;color:#5d6f74}
