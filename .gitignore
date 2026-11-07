@@ -1,0 +1,14 @@
+# secrets live in $HERMES_HOME/.env, never here
+.env
+.env.*
+*.pem
+*.key
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+
+# local runtime noise
+*.log
+.DS_Store
