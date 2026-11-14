@@ -1058,6 +1058,34 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+
+        # The only write action in the app. Deliberately narrow: it takes a list
+        # of torrent hashes and nothing else, and media_stack re-verifies every
+        # one against removable() before touching a client.
+        if path == "/api/media/cleanup":
+            if not self._gate(path):
+                return
+            if self.media is None:
+                return self._json({"error": "media_disabled"}, 503)
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(min(n, 65536)).decode() or "{}")
+            except Exception:
+                return self._json({"error": "bad_request"}, 400)
+            hashes = body.get("hashes")
+            if not isinstance(hashes, list) or not hashes:
+                return self._json({"error": "no_hashes"}, 400)
+            if len(hashes) > 50:
+                return self._json({"error": "too_many"}, 400)
+            try:
+                res = self.media.remove(hashes)
+            except Exception as exc:
+                return self._json({"error": exc.__class__.__name__,
+                                   "detail": str(exc)}, 502)
+            print(f"[cleanup] removed={res['removed']} failed={res['failed']} "
+                  f"freed={res['freed_gb']}GB")
+            return self._json(res)
+
         if path != "/api/login":
             return self._json({"error": "not_found"}, 404)
         if self.auth is None or not self.auth.configured:
@@ -1107,6 +1135,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(s)
         if path == "/api/graph":
             return self._json(d.graph())
+        if path == "/api/media/removable":
+            if self.media is None:
+                return self._json({"error": "media_disabled"}, 503)
+            try:
+                return self._json(self.media.removable())
+            except Exception as exc:
+                return self._json({"error": exc.__class__.__name__,
+                                   "detail": str(exc)}, 502)
         if path == "/api/media":
             if self.media is None:
                 return self._json({"error": "media_disabled"}, 503)

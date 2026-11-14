@@ -819,6 +819,83 @@ async function loadMedia() {
       }).join("");
 }
 
+/* ------------------------------------------------- media: cleanup */
+
+let rmState = { items: [], blocked: [], sel: new Set() };
+
+function rmRender() {
+  const { items, blocked, sel } = rmState;
+  const gb = items.filter((i) => sel.has(i.hash))
+                  .reduce((a, i) => a + i.size_gb, 0);
+  document.getElementById("rmCount").textContent = items.length === 0
+    ? "nothing to clear"
+    : `${items.length} finished · ${gb.toFixed(2)} GB selected`;
+
+  const btn = document.getElementById("rmBtn");
+  btn.disabled = sel.size === 0;
+  btn.textContent = sel.size ? `Remove ${sel.size} · free ${gb.toFixed(2)} GB` : "Remove selected";
+
+  document.getElementById("rmBody").innerHTML = items.length === 0
+    ? `<div class="sub" style="padding:14px 2px">no completed downloads are finished with yet</div>`
+    : items.map((i) => `<label class="rm-row">
+        <input type="checkbox" data-h="${esc(i.hash)}" ${sel.has(i.hash) ? "checked" : ""} />
+        <span class="rm-name">${esc(i.name)}</span>
+        <span class="rm-meta">${i.size_gb.toFixed(2)} GB · ratio ${(i.ratio ?? 0).toFixed(2)} · ${i.seed_hours ?? 0}h</span>
+        <span class="mini-tag">${esc(i.client)}</span>
+      </label>`).join("");
+
+  document.getElementById("rmBlocked").innerHTML = blocked.length === 0 ? "" :
+    `<div class="rm-blocked-head">${blocked.length} not offered</div>` +
+    blocked.slice(0, 8).map((b) => `<div class="mini-row">
+      <span class="mini-ico warn">●</span>
+      <span class="mini-name">${esc(b.name)}</span>
+      <span class="mini-tag">${esc(b.reason)}</span>
+    </div>`).join("");
+}
+
+async function loadRemovable() {
+  const d = await getJSON("/api/media/removable");
+  rmState.items = d.items || [];
+  rmState.blocked = d.blocked || [];
+  rmState.sel = new Set();
+  rmRender();
+}
+
+document.addEventListener("change", (e) => {
+  const cb = e.target.closest("#rmBody input[type=checkbox]");
+  if (!cb) return;
+  cb.checked ? rmState.sel.add(cb.dataset.h) : rmState.sel.delete(cb.dataset.h);
+  rmRender();
+});
+
+document.addEventListener("click", async (e) => {
+  if (!e.target.closest("#rmBtn")) return;
+  const sel = [...rmState.sel];
+  if (!sel.length) return;
+  const picked = rmState.items.filter((i) => sel.includes(i.hash));
+  const gb = picked.reduce((a, i) => a + i.size_gb, 0).toFixed(2);
+  const names = picked.map((i) => "  • " + i.name).join("\n");
+  if (!confirm(`Delete ${sel.length} download(s) and their files from the download folder?\n\n${names}\n\nFrees ~${gb} GB. Your library copies are untouched.`))
+    return;
+  const btn = document.getElementById("rmBtn");
+  btn.disabled = true; btn.textContent = "Removing…";
+  try {
+    const r = await fetch("/api/media/cleanup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hashes: sel }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || d.error || r.status);
+    alert(`Removed ${d.removed}, freed ${d.freed_gb} GB` +
+          (d.failed ? `\n${d.failed} failed:\n` +
+            d.results.filter((x) => !x.ok).map((x) => "  • " + x.detail).join("\n") : ""));
+  } catch (err) {
+    alert("Cleanup failed: " + err.message);
+  }
+  await Promise.all([loadRemovable().catch(() => {}), loadMedia().catch(() => {})]);
+}, true);
+
 /* ----------------------------------------------------------------- go */
 
 (async function init() {
@@ -829,7 +906,7 @@ async function loadMedia() {
     await Promise.all([
       loadDocs(), loadSkills(), loadMemory(), loadActivity(),
       loadMission(), loadSchedule(), loadInsights(), loadStack(), loadChats(),
-      loadDreams(), loadMedia(),
+      loadDreams(), loadMedia(), loadRemovable(),
     ]);
   } catch (err) {
     document.getElementById("railFoot").textContent = "error: " + err.message;
@@ -839,6 +916,9 @@ async function loadMedia() {
   // downloads move: refresh the media panel more often, but only when visible
   setInterval(() => {
     const p = document.querySelector('[data-page="media"]');
-    if (p && !p.classList.contains("hidden")) loadMedia().catch(() => {});
+    if (p && !p.classList.contains("hidden")) {
+      loadMedia().catch(() => {});
+      loadRemovable().catch(() => {});
+    }
   }, 10000);
 })();
